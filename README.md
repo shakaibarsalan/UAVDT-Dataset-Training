@@ -139,9 +139,6 @@ evaluate_model(trained_model, test_loader, device)
 - Evaluation prints average detections per image and other metrics.
 - Visualizations provide qualitative insights into model performance, including detection overlays and comparison plots.
 
-## License
-
-This project is released under the MIT License.
 
 ## Acknowledgements
 
