@@ -1,146 +1,99 @@
-# UAVDT-Dataset-Training
+# UAVDT Vehicle Detection
 
-A PyTorch-based pipeline for training and evaluating object detection models on the UAVDT dataset using Faster R-CNN. This project provides custom dataset handling, training, evaluation, and advanced visualization utilities for UAV-based vehicle detection.
+**Fine-tuning a COCO-pretrained Faster R-CNN to find cars, buses and trucks in drone footage from the UAVDT benchmark.**
 
-## Table of Contents
+![Faster R-CNN predictions on six UAVDT test frames, with ground-truth boxes and per-class confidence labels](docs/images/detections-grid.jpg)
 
-- [Overview](#overview)
-- [Features](#features)
-- [Dataset](#dataset)
-- [Installation](#installation)
-- [Usage](#usage)
-  - [Data Preparation](#data-preparation)
-  - [Training](#training)
-  - [Evaluation](#evaluation)
-  - [Visualization](#visualization)
-- [Customization](#customization)
-- [Results](#results)
-- [License](#license)
+## What it does
 
-## Overview
+[`uavdt-dataset-training.ipynb`](uavdt-dataset-training.ipynb) is a complete PyTorch pipeline in one notebook:
 
-This repository enables training and evaluation of a Faster R-CNN model on the UAVDT dataset, a challenging benchmark for object detection in aerial images. The code is designed for easy use in both Kaggle and Colab environments, with modular components for dataset parsing, model training, and result visualization.
+- a custom `Dataset` that reads UAVDT frames and their JSON box annotations
+- a torchvision **Faster R-CNN (ResNet-50 + FPN)** with its classifier head swapped for the UAVDT classes
+- a training loop with SGD, a step learning-rate schedule and checkpoints every 5 epochs
+- a simple evaluation pass, plus three visualizers: predictions only, ground truth vs prediction side by side, and a confidence-threshold grid
 
-## Features
+The aerial frames are hard: small vehicles, dense traffic, night scenes, haze and steep camera angles. That makes UAVDT a good test of how far a COCO-pretrained detector moves with very little fine-tuning.
 
-- Custom PyTorch Dataset for UAVDT-style annotation parsing
-- Faster R-CNN (ResNet-50 FPN) with configurable number of classes
-- Flexible DataLoader with custom collate and transform functions
-- Training loop with checkpointing and learning rate scheduling
-- Evaluation metrics (detections per image, thresholding)
-- Visualization tools for predictions, ground truth, and side-by-side comparisons
-- Support for batch size, number of images, and device selection
+## How it works
 
-## Dataset
+**Data.** Each image `M0603_img000325.jpg` has an annotation `M0603_img000325.jpg.json`, Supervisely style: `objects[]` with a `classTitle` and a rectangle in `points.exterior`. `UAVDTDataset` keeps only images that have an annotation. It fixes box corner order, drops degenerate boxes and builds the class map from the files it loaded:
 
-- **UAVDT**: Unmanned Aerial Vehicle Detection dataset
-- Download via Kaggle: `shakaibkaggle/uavdt-dataset`
-- Directory structure:
-  ```
-  /uavdt-dataset/
-    ├── train/
-    │   ├── img/
-    │   └── ann/
-    └── test/
-        ├── img/
-        └── ann/
-  ```
-
-## Installation
-
-1. **Clone the repository:**
-   ```bash
-   git clone https://github.com/yourusername/uavdt-dataset-training.git
-   cd uavdt-dataset-training
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   pip install torch torchvision numpy matplotlib tqdm pillow kagglehub
-   ```
-
-3. **(Optional) Download the dataset via Kaggle:**
-   ```python
-   import kagglehub
-   kagglehub.dataset_download('shakaibkaggle/uavdt-dataset')
-   ```
-
-## Usage
-
-### Data Preparation
-
-- Ensure the UAVDT dataset is downloaded and extracted in the correct folder structure.
-- Update `dataset_path` in the script to point to your dataset location.
-
-### Training
-
-```python
-from your_module import train_model, get_model, UAVDTDataset, get_transforms
-
-# Prepare dataset and dataloader
-train_dataset = UAVDTDataset(root_dir='/path/to/uavdt-dataset', split='train', transforms=get_transforms(train=True))
-train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True, collate_fn=collate_fn, num_workers=2)
-
-# Initialize model
-num_classes = len(train_dataset.class_to_idx)
-model = get_model(num_classes)
-
-# Train
-trained_model = train_model(model, train_loader, optimizer, lr_scheduler, num_epochs=10)
+```
+train classes: __background__, bus, car, truck
+test classes:  __background__, bus, car, truck, vehicle
 ```
 
-### Evaluation
+Images are normalised with ImageNet mean and std. There's no augmentation yet. A `max_images` argument (default 1,000) caps how many images load, so a full run fits in one Kaggle session.
+
+**Model.** `fasterrcnn_resnet50_fpn(pretrained=True)` keeps the COCO backbone, FPN and region proposal network. The box predictor is replaced by a `FastRCNNPredictor` with 4 outputs.
 
 ```python
-from your_module import evaluate_model
-
-# Evaluate on test set
-evaluate_model(trained_model, test_loader, device)
+model = fasterrcnn_resnet50_fpn(pretrained=True)
+in_features = model.roi_heads.box_predictor.cls_score.in_features
+model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
 ```
 
-### Visualization
-
-- **Visualize predictions:**
-  ```python
-  visualize_predictions(trained_model, test_dataset, num_samples=3)
-  ```
-
-- **Advanced visualization:**
-  ```python
-  visualize_object_detection_results(
-      model=trained_model,
-      test_dataset=test_dataset,
-      num_samples=6,
-      confidence_threshold=0.5
-  )
-  ```
-
-- **Side-by-side comparison:**
-  ```python
-  visualize_detection_comparison(
-      model=trained_model,
-      test_dataset=test_dataset,
-      num_samples=4,
-      confidence_threshold=0.5
-  )
-  ```
-
-## Customization
-
-- Change number of images: Use `max_images` parameter in `UAVDTDataset`.
-- Adjust batch size: Modify `batch_size` in DataLoader.
-- Set number of epochs: Change `num_epochs` in `train_model`.
-- Modify transforms: Edit `get_transforms()` for data augmentation.
-- Change model: Swap out `get_model()` for a different architecture if desired.
+**Training.**
+- Optimiser: SGD with learning rate 0.005, momentum 0.9 and weight decay 5e-4.
+- Schedule: `StepLR(step_size=3, gamma=0.1)`.
+- Batch size: 4, with a custom `collate_fn` so images of different sizes can share a batch.
+- The loss is the sum of Faster R-CNN's four losses: classifier, box regression, objectness and RPN box.
 
 ## Results
 
-- Model checkpoints are saved every 5 epochs and at the end of training.
-- Evaluation prints average detections per image and other metrics.
-- Visualizations provide qualitative insights into model performance, including detection overlays and comparison plots.
+These are from the saved notebook run on a Kaggle Tesla T4:
 
+| | |
+|---|---|
+| Training data | 1,000 of 24,143 annotated training frames |
+| Training | 2 epochs × 250 iterations, about 5 min 15 s per epoch |
+| Average loss | **0.7252** after epoch 1 → **0.4812** after epoch 2 |
+| Test data | 1,000 of 53,676 test frames |
+| Detections (score > 0.5) | **11,114** in total, **11.11 per image** |
 
-## Acknowledgements
+From the visualisation cells, average detections per image on small random samples were 15.00 at a 0.3 threshold, 10.17 at 0.5 and 5.62 at 0.8.
 
-- UAVDT Dataset: UAVDT Benchmark
-- PyTorch, torchvision, and Kaggle
+![Ground truth (left) vs predictions (right) on four test frames](docs/images/gt-vs-prediction.jpg)
+
+**How to read these numbers.** They show the detector working, but they don't measure accuracy. The notebook counts detections and doesn't compute mAP, precision or recall yet. The test split also labels many vehicles with a generic `vehicle` class the model never trained on, and some test frames carry only one box (see above), so raw counts can't be scored against ground truth. Next steps:
+
+1. Map `vehicle` onto the training classes, or train on all four.
+2. Add COCO-style mAP@[.5:.95] with `torchmetrics` or `pycocotools`.
+3. Train longer on more than 4% of the training frames, with flips and scale jitter.
+
+## Run it
+
+**On Kaggle (easiest).** Open the notebook, attach the dataset `shakaibkaggle/uavdt-dataset`, switch the accelerator to a GPU and click *Run all*. The notebook expects `/kaggle/input/uavdt-dataset`.
+
+**Locally:**
+
+```bash
+git clone https://github.com/shakaibarsalan/UAVDT-Dataset-Training.git
+cd UAVDT-Dataset-Training
+pip install torch torchvision numpy matplotlib tqdm pillow kagglehub jupyter
+python -c "import kagglehub; print(kagglehub.dataset_download('shakaibkaggle/uavdt-dataset'))"
+jupyter notebook uavdt-dataset-training.ipynb
+```
+
+Set `dataset_path`, in the cell that builds the datasets and loaders, to the folder that download printed. It should contain `train/img`, `train/ann`, `test/img` and `test/ann`. The cell before it only demos `max_images` against the Kaggle path, so skip it or change the path there too.
+
+Settings you'll want to change:
+- `max_images` loads more data. Pass `float('inf')` to use every annotated frame.
+- `num_epochs` in `main()` trains longer.
+- `batch_size` should match your GPU memory.
+- `confidence_threshold` in the visualisers filters weak boxes.
+
+`main()` writes the final weights to `/kaggle/working/faster_rcnn_final.pth` and a checkpoint every 5 epochs. Change the path when running outside Kaggle. `load_trained_model()` and `predict_single_image()` reload the weights for inference on new frames.
+
+## Tech stack
+
+Python 3.11 · PyTorch · torchvision (Faster R-CNN ResNet-50 FPN) · NumPy · Pillow · Matplotlib · tqdm · Kaggle (Tesla T4)
+
+## License
+
+The code is under the [MIT License](LICENSE). The UAVDT dataset and its images belong to their authors and are used here for research. The dataset isn't included in this repo.
+
+## Author
+
+**Muhammad Shakaib Arsalan**: [shakaib.vercel.app](https://shakaib.vercel.app) · [LinkedIn](https://www.linkedin.com/in/shakaib-arsalan)
